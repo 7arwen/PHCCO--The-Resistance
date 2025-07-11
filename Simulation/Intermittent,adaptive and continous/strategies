@@ -1,0 +1,405 @@
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy.integrate import solve_ivp
+from sklearn.preprocessing import MinMaxScaler
+
+# --- Basic Setup for Our Simulation ---
+
+# How many hours are in a day (important for converting daily rates)
+hours_in_a_day = 24
+
+# These numbers describe how our cancer cells behave
+# 'on_drug' means when the patient is taking the medicine
+# 'off_drug' means when the patient is not taking the medicine
+# 'r_S', 'r_P', 'r_R' are how fast Sensitive, Persister, and Resistant cells grow
+# 'alpha' is how Sensitive cells become Persister cells
+# 'beta' is how Persister cells become Sensitive cells (when off drug)
+# 'delta' is how Persister cells become Resistant cells
+cell_behavior_rules = {
+    "on_drug": {
+        "r_S": -0.0015,
+        "r_P": 0.0001 / hours_in_a_day,
+        "r_R": 0.212651 / hours_in_a_day,
+        "alpha": 0.0342,
+        "beta": 0,
+        "delta": 0.0186 / hours_in_a_day
+    },
+    "off_drug": {
+        "r_S": 0.0193,
+        "r_P": -0.0001,
+        "r_R": 0.01 / hours_in_a_day,
+        "alpha": 0,
+        "beta": 1 / (9 * hours_in_a_day),
+        "delta": 0
+    }
+}
+
+# How many cells we start with: Sensitive, Persister, Resistant
+starting_cell_counts = [1000000, 0, 0] # 1 million Sensitive cells, no others
+
+# How long we want to run the simulation (in hours and days)
+total_simulation_time_hours = 180 * hours_in_a_day # 45 days
+time_points_for_plot = np.linspace(0, total_simulation_time_hours, 1000) # 1000 points to draw the lines smoothly
+
+# --- Different Ways to Give Therapy (Strategies) ---
+
+# Adaptive Therapy: We turn the drug ON/OFF based on how many Sensitive cells there are
+# These are percentages of the starting Sensitive cells (e.g., 0.1 means 10%)
+adaptive_therapy_percentages = [i / 100 for i in range(10, 100, 10)]
+
+# Intermittent Therapy: We turn the drug ON for some days, then OFF for some days
+# Each pair is (ON_days, OFF_days)
+intermittent_therapy_schedules = [
+    (1, 1), (2, 2), (3, 3), (4, 4), (6, 6), (8, 8), (11, 11), (12, 12), (15, 15),
+    (17, 17), (20, 20), (25, 25), (22, 22)
+]
+
+# A list to keep track of all our simulation results
+all_strategy_results = []
+
+# --- How the Cancer Cells Change Over Time (The Math Part) ---
+
+# This function describes how the cell counts change for Adaptive Therapy
+def adaptive_therapy_model(time_now, current_cells, decision_threshold):
+    sensitive_cells, persister_cells, resistant_cells = current_cells
+
+    # Decide if drug is ON or OFF based on sensitive cell count
+    if sensitive_cells > decision_threshold:
+        rules_to_use = cell_behavior_rules["on_drug"]
+    else:
+        rules_to_use = cell_behavior_rules["off_drug"]
+
+    # Calculate how much each cell type changes
+    change_in_S = rules_to_use["r_S"] * sensitive_cells - rules_to_use["alpha"] * sensitive_cells + rules_to_use["beta"] * persister_cells
+    change_in_P = rules_to_use["r_P"] * persister_cells + rules_to_use["alpha"] * sensitive_cells - rules_to_use["beta"] * persister_cells - rules_to_use["delta"] * persister_cells
+    change_in_R = rules_to_use["r_R"] * resistant_cells + rules_to_use["delta"] * persister_cells
+    return [change_in_S, change_in_P, change_in_R]
+
+# This function describes how the cell counts change for Intermittent Therapy
+def intermittent_therapy_model(time_now, current_cells, on_days_in_cycle, total_cycle_hours):
+    sensitive_cells, persister_cells, resistant_cells = current_cells
+
+    # Decide if drug is ON or OFF based on time in the cycle
+    time_in_current_cycle = (time_now % total_cycle_hours)
+    if time_in_current_cycle < on_days_in_cycle * hours_in_a_day:
+        rules_to_use = cell_behavior_rules["on_drug"]
+    else:
+        rules_to_use = cell_behavior_rules["off_drug"]
+
+    # Calculate how much each cell type changes
+    change_in_S = rules_to_use["r_S"] * sensitive_cells - rules_to_use["alpha"] * sensitive_cells + rules_to_use["beta"] * persister_cells
+    change_in_P = rules_to_use["r_P"] * persister_cells + rules_to_use["alpha"] * sensitive_cells - rules_to_use["beta"] * persister_cells - rules_to_use["delta"] * persister_cells
+    change_in_R = rules_to_use["r_R"] * resistant_cells + rules_to_use["delta"] * persister_cells
+    return [change_in_S, change_in_P, change_in_R]
+
+
+# --- Running the Simulations for Many Strategies ---
+
+print("Starting Adaptive Therapy simulations...")
+for each_percentage in adaptive_therapy_percentages:
+    current_threshold = each_percentage * starting_cell_counts[0]
+    strategy_name = f"Adaptive-{int(each_percentage * 100)}%"
+
+    # Run the simulation for this adaptive strategy
+    solution = solve_ivp(adaptive_therapy_model, [0, total_simulation_time_hours], starting_cell_counts, t_eval=time_points_for_plot,
+                    args=(current_threshold,))
+
+    time_in_days = solution.t / hours_in_a_day
+    S_cells, P_cells, R_cells = solution.y
+
+    # Calculate important numbers for this strategy
+    area_under_resistance_curve = np.trapz(R_cells, time_in_days) # How much resistant cells are there over time
+    total_tumor_area = np.trapz(S_cells + P_cells + R_cells, time_in_days) # How much total tumor is there over time
+    last_resistant_count = R_cells[-1] # How many resistant cells are left at the end
+
+    # Figure out how many days the drug was actually used
+    drug_usage_check = [1 if cell_behavior_rules["on_drug"] == (cell_behavior_rules["on_drug"] if S_cells[i] > current_threshold else cell_behavior_rules["off_drug"]) else 0 for i, t_val in enumerate(solution.t)]
+    drug_use_days = np.sum(drug_usage_check) * (solution.t[1] - solution.t[0]) / hours_in_a_day
+
+    all_strategy_results.append({
+        "Strategy": strategy_name,
+        "Final Resistant Cell Count": last_resistant_count,
+        "Resistant Cells Area (AUC)": area_under_resistance_curve,
+        "Total Tumor Area (AUC)": total_tumor_area,
+        "Drug Usage (days)": drug_use_days
+    })
+
+print("Starting Intermittent Therapy simulations...")
+for on_days, off_days in intermittent_therapy_schedules:
+    strategy_name = f"Intermittent-{on_days}ON/{off_days}OFF"
+    cycle_length_hours = (on_days + off_days) * hours_in_a_day
+
+    # Run the simulation for this intermittent strategy
+    solution = solve_ivp(intermittent_therapy_model, [0, total_simulation_time_hours], starting_cell_counts, t_eval=time_points_for_plot,
+                    args=(on_days, cycle_length_hours))
+
+    time_in_days = solution.t / hours_in_a_day
+    S_cells, P_cells, R_cells = solution.y
+
+    # Calculate important numbers for this strategy
+    area_under_resistance_curve = np.trapz(R_cells, time_in_days)
+    total_tumor_area = np.trapz(S_cells + P_cells + R_cells, time_in_days)
+    last_resistant_count = R_cells[-1]
+
+    # Drug usage for intermittent is a simple calculation based on the schedule
+    drug_use_days = (on_days / (on_days + off_days)) * (total_simulation_time_hours / hours_in_a_day)
+
+    all_strategy_results.append({
+        "Strategy": strategy_name,
+        "Final Resistant Cell Count": last_resistant_count,
+        "Resistant Cells Area (AUC)": area_under_resistance_curve,
+        "Total Tumor Area (AUC)": total_tumor_area,
+        "Drug Usage (days)": drug_use_days
+    })
+
+# Turn our results into a nice table (DataFrame)
+results_table = pd.DataFrame(all_strategy_results)
+# Sort the table to see which strategies are best at fighting resistance (lower AUC is better)
+results_table_sorted = results_table.sort_values(by="Resistant Cells Area (AUC)").reset_index(drop=True)
+
+# Show the top 10 strategies that suppress resistance the most
+print("\nHere are the Top 10 Strategies for Fighting Resistance (lower 'Resistant Cells Area' is better):")
+print(results_table_sorted.head(10).to_string(index=False, float_format="%.2e"))
+
+# You can save all these results to a file if you want
+results_table_sorted.to_csv("therapy_comparison_results.csv", index=False)
+print("\nAll results saved to 'therapy_comparison_results.csv'")
+
+# --- Making Plots to See Our Results ---
+
+# Define the directory to save images
+image_save_dir = "therapy_plots"
+os.makedirs(image_save_dir, exist_ok=True) # Create the directory if it doesn't exist
+
+# Plot 1: Bar Chart of Resistant Cell Area for the Best Strategies
+plt.figure(figsize=(14, 6))
+sns.barplot(data=results_table_sorted.head(15), x="Strategy", y="Resistant Cells Area (AUC)", palette="rocket")
+plt.xticks(rotation=75, ha='right') # Turn labels sideways so they fit
+plt.title("Top 15 Strategies by Resistant Cell Burden Over Time")
+plt.ylabel("Resistant Cells Area (Lower is Better)")
+plt.xlabel("Therapy Strategy")
+plt.tight_layout() # Adjust plot to prevent labels from overlapping
+plt.savefig(os.path.join(image_save_dir, "resistant_cell_area_barplot.png"), dpi=300, bbox_inches='tight')
+plt.close() # Close the figure to free memory
+
+# Plot 2: How Drug Usage Affects Resistant Cell Area
+plt.figure(figsize=(12, 6))
+sns.scatterplot(data=results_table_sorted, x="Drug Usage (days)", y="Resistant Cells Area (AUC)", hue="Strategy", s=100, alpha=0.7)
+plt.title("Balancing Drug Usage and Resistance Control")
+plt.xlabel("Total Drug Usage (days)")
+plt.ylabel("Resistant Cells Area (Lower is Better)")
+plt.grid(True) # Add a grid for easier reading
+plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0., title="Strategy", fontsize='small')
+plt.tight_layout()
+plt.savefig(os.path.join(image_save_dir, "drug_usage_vs_resistant_area_scatterplot.png"), dpi=300, bbox_inches='tight')
+plt.close() # Close the figure to free memory
+
+# Plot 3: How Drug Usage Affects the Final Resistant Cell Count
+plt.figure(figsize=(12, 6))
+sns.scatterplot(data=results_table_sorted, x="Drug Usage (days)", y="Final Resistant Cell Count", hue="Strategy", s=100, alpha=0.7)
+plt.title("Final Resistance Level vs. Drug Usage")
+plt.xlabel("Total Drug Usage (days)")
+plt.ylabel("Final Resistant Cell Count")
+plt.yscale("log") # Use a special scale because cell counts can be very different
+plt.grid(True)
+plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0., title="Strategy", fontsize='small')
+plt.tight_layout()
+plt.savefig(os.path.join(image_save_dir, "drug_usage_vs_final_resistant_count_scatterplot.png"), dpi=300, bbox_inches='tight')
+plt.close() # Close the figure to free memory
+
+# --- Finding the 'Best' Strategies Using a Combined Score ---
+
+# We need to make all numbers comparable (normalize them)
+data_to_normalize = results_table_sorted[["Resistant Cells Area (AUC)", "Final Resistant Cell Count", "Drug Usage (days)"]]
+normalizer = MinMaxScaler()
+normalized_data = normalizer.fit_transform(data_to_normalize)
+normalized_table = pd.DataFrame(normalized_data, columns=["Normalized_Resistant_Area", "Normalized_Final_R", "Normalized_Drug_Usage"])
+
+# Give different importance (weights) to each factor
+# Higher numbers for the score will mean better strategies
+score_weights = {
+    "resistant_area": 0.5, # We care most about keeping resistance low
+    "final_resistance": 0.2, # Also important how much resistance is left at the end
+    "drug_usage": 0.3  # We also want to use less drug
+}
+
+# Calculate an overall score for each strategy
+# We subtract from 1 because lower resistance/drug usage is better, but a higher score is better
+results_table_sorted["Overall Score"] = (
+    score_weights["resistant_area"] * (1 - normalized_table["Normalized_Resistant_Area"]) +
+    score_weights["final_resistance"] * (1 - normalized_table["Normalized_Final_R"]) +
+    score_weights["drug_usage"] * (1 - normalized_table["Normalized_Drug_Usage"])
+)
+
+# Rank all strategies by their overall score (highest score is best)
+ranked_strategies = results_table_sorted.sort_values(by="Overall Score", ascending=False).reset_index(drop=True)
+
+# Show the top 10 strategies based on our overall score
+print("\n⭐ Top 10 Strategies Based on Overall Score (Higher Score is Better):")
+print(ranked_strategies[["Strategy", "Overall Score", "Resistant Cells Area (AUC)", "Final Resistant Cell Count", "Drug Usage (days)"]].head(10).to_string(index=False, float_format="%.2e"))
+
+# Plot 4: Bar Chart of Overall Score for the Top 5 Strategies
+top5_by_overall_score = ranked_strategies.head(5)
+plt.figure(figsize=(10, 6))
+sns.barplot(data=top5_by_overall_score, x="Strategy", y="Overall Score", palette="viridis")
+plt.title("Top 5 Therapy Strategies by Overall Score")
+plt.ylabel("Overall Score (Higher = Better)")
+plt.xlabel("Therapy Strategy")
+plt.xticks(rotation=45, ha='right')
+plt.ylim(0, 1) # Score is between 0 and 1
+plt.tight_layout()
+plt.grid(axis='y')
+plt.savefig(os.path.join(image_save_dir, "top5_overall_score_barplot.png"), dpi=300, bbox_inches='tight')
+plt.close() # Close the figure to free memory
+
+# Plot 5: Bar Chart of Overall Score for Top 3 Adaptive and Top 3 Intermittent Strategies
+top_adaptive_ranked_3 = ranked_strategies[ranked_strategies["Strategy"].str.startswith("Adaptive")].head(3)
+top_intermittent_ranked_3 = ranked_strategies[ranked_strategies["Strategy"].str.startswith("Intermittent")].head(3)
+
+top6_for_comparison = pd.concat([top_adaptive_ranked_3, top_intermittent_ranked_3])
+
+plt.figure(figsize=(10, 6))
+sns.barplot(data=top6_for_comparison, x="Strategy", y="Overall Score", palette="Set2")
+plt.title("Overall Score for Top 3 Adaptive & Top 3 Intermittent Strategies")
+plt.ylabel("Overall Score (Higher = Better)")
+plt.xlabel("Therapy Strategy")
+plt.xticks(rotation=45, ha='right')
+plt.ylim(0, 1)
+plt.tight_layout()
+plt.grid(axis='y')
+plt.savefig(os.path.join(image_save_dir, "top6_adaptive_intermittent_overall_score_barplot.png"), dpi=300, bbox_inches='tight')
+plt.close() # Close the figure to free memory
+
+# --- Plotting How Cells Change Over Time for Basic Therapy Types ---
+
+print("\nShowing how cell counts change over time for Continuous, a fixed Intermittent, and a fixed Adaptive Therapy...")
+
+# Shorter time for this initial comparison plot (30 days)
+short_simulation_time_hours = 30 * hours_in_a_day
+short_time_points = np.linspace(0, short_simulation_time_hours, 1000)
+
+# The different basic therapy types we want to compare
+basic_therapy_types = ['continuous', 'intermittent', 'adaptive']
+
+# This function decides which rules to use for the basic comparison plots
+def get_rules_for_basic_plot(time_now, sensitive_cells_now, therapy_type):
+    if therapy_type == 'continuous':
+        return cell_behavior_rules['on_drug']
+    elif therapy_type == 'intermittent':
+        # This is a fixed 3-day ON, 3-day OFF schedule for this specific plot
+        cycle_length_for_plot_hours = (3 + 3) * hours_in_a_day
+        time_in_cycle_for_plot = (time_now % cycle_length_for_plot_hours)
+        return cell_behavior_rules['on_drug'] if time_in_cycle_for_plot < 3 * hours_in_a_day else cell_behavior_rules['off_drug']
+    elif therapy_type == 'adaptive':
+        # This is a fixed 70% threshold for this specific plot
+        threshold_for_plot = 0.7 * starting_cell_counts[0]
+        return cell_behavior_rules['on_drug'] if sensitive_cells_now > threshold_for_plot else cell_behavior_rules['off_drug']
+
+# This function describes how cells change for the basic comparison plots
+def basic_therapy_model(time_now, current_cells, therapy_type_for_model):
+    sensitive_cells, persister_cells, resistant_cells = current_cells
+    rules_to_use = get_rules_for_basic_plot(time_now, sensitive_cells, therapy_type_for_model)
+
+    # Corrected line: 'sensitive_to_cells' changed to 'sensitive_cells'
+    change_in_S = rules_to_use["r_S"] * sensitive_cells - rules_to_use["alpha"] * sensitive_cells + rules_to_use["beta"] * persister_cells
+    change_in_P = rules_to_use["r_P"] * persister_cells + rules_to_use["alpha"] * sensitive_cells - rules_to_use["beta"] * persister_cells - rules_to_use["delta"] * persister_cells
+    change_in_R = rules_to_use["r_R"] * resistant_cells + rules_to_use["delta"] * persister_cells
+    return [change_in_S, change_in_P, change_in_R]
+
+# Run simulations for the basic therapy types
+solutions_for_basic_plot = {}
+for each_type in basic_therapy_types:
+    solution = solve_ivp(basic_therapy_model, [0, short_simulation_time_hours], starting_cell_counts, t_eval=short_time_points, args=(each_type,))
+    solutions_for_basic_plot[each_type] = solution
+
+# Plotting the S, P, R cell counts for the basic therapy types
+plt.figure(figsize=(18, 6)) # Make the plot wide enough for 3 side-by-side graphs
+for i, each_type in enumerate(basic_therapy_types):
+    solution = solutions_for_basic_plot[each_type]
+    plt.subplot(1, 3, i + 1) # Create 3 sub-plots in one row
+    plt.plot(solution.t / hours_in_a_day, solution.y[0], label='Sensitive Cells', color='orange')
+    plt.plot(solution.t / hours_in_a_day, solution.y[1], label='Persister Cells', color='darkorange')
+    plt.plot(solution.t / hours_in_a_day, solution.y[2], label='Resistant Cells', color='crimson')
+    plt.title(f"{each_type.capitalize()} Therapy")
+    plt.xlabel("Time (days)")
+    plt.ylabel("Number of Cells")
+    plt.yscale("log") # Use a special scale for cell counts
+    plt.legend() # Show what each line means
+    plt.grid(True) # Add a grid
+
+plt.tight_layout() # Adjust plot to prevent labels from overlapping
+plt.savefig(os.path.join(image_save_dir, "basic_therapy_cell_counts_comparison.png"), dpi=300, bbox_inches='tight')
+plt.close() # Close the figure to free memory
+
+
+# --- Plotting How Resistant Cells Change Over Time for the Best Strategies ---
+# --- Plotting How Cells Change Over Time for Basic Therapy Types ---
+
+print("\nShowing how cell counts change over time for Continuous, a fixed Intermittent, and a fixed Adaptive Therapy...")
+
+# Shorter time for this initial comparison plot (30 days)
+short_simulation_time_hours = 30 * hours_in_a_day
+short_time_points = np.linspace(0, short_simulation_time_hours, 1000)
+
+# The different basic therapy types we want to compare
+basic_therapy_types = ['continuous', 'intermittent', 'adaptive']
+
+# This function decides which rules to use for the basic comparison plots
+def get_rules_for_basic_plot(time_now, sensitive_cells_now, therapy_type):
+    if therapy_type == 'continuous':
+        return cell_behavior_rules['on_drug']
+    elif therapy_type == 'intermittent':
+        # This is a fixed 3-day ON, 3-day OFF schedule for this specific plot
+        cycle_length_for_plot_hours = (3 + 3) * hours_in_a_day
+        time_in_cycle_for_plot = (time_now % cycle_length_for_plot_hours)
+        return cell_behavior_rules['on_drug'] if time_in_cycle_for_plot < 3 * hours_in_a_day else cell_behavior_rules['off_drug']
+    elif therapy_type == 'adaptive':
+        # This is a fixed 70% threshold for this specific plot
+        threshold_for_plot = 0.7 * starting_cell_counts[0]
+        return cell_behavior_rules['on_drug'] if sensitive_cells_now > threshold_for_plot else cell_behavior_rules['off_drug']
+
+# This function describes how cells change for the basic comparison plots
+def basic_therapy_model(time_now, current_cells, therapy_type_for_model):
+    sensitive_cells, persister_cells, resistant_cells = current_cells
+    rules_to_use = get_rules_for_basic_plot(time_now, sensitive_cells, therapy_type_for_model)
+
+    # Corrected line: 'sensitive_to_cells' changed to 'sensitive_cells'
+    change_in_S = rules_to_use["r_S"] * sensitive_cells - rules_to_use["alpha"] * sensitive_cells + rules_to_use["beta"] * persister_cells
+    change_in_P = rules_to_use["r_P"] * persister_cells + rules_to_use["alpha"] * sensitive_cells - rules_to_use["beta"] * persister_cells - rules_to_use["delta"] * persister_cells
+    change_in_R = rules_to_use["r_R"] * resistant_cells + rules_to_use["delta"] * persister_cells
+    return [change_in_S, change_in_P, change_in_R]
+
+# Run simulations for the basic therapy types
+solutions_for_basic_plot = {}
+for each_type in basic_therapy_types:
+    solution = solve_ivp(basic_therapy_model, [0, short_simulation_time_hours], starting_cell_counts, t_eval=short_time_points, args=(each_type,))
+    solutions_for_basic_plot[each_type] = solution
+
+# Plotting the S, P, R cell counts for the basic therapy types
+plt.figure(figsize=(18, 6)) # Make the plot wide enough for 3 side-by-side graphs
+# Define distinct colors for the cell types
+cell_colors = {
+    'Sensitive Cells': 'blue',
+    'Persister Cells': 'red',
+    'Resistant Cells': 'gold' # Using 'gold' for yellow
+}
+
+for i, each_type in enumerate(basic_therapy_types):
+    solution = solutions_for_basic_plot[each_type]
+    plt.subplot(1, 3, i + 1) # Create 3 sub-plots in one row
+    plt.plot(solution.t / hours_in_a_day, solution.y[0], label='Sensitive Cells', color=cell_colors['Sensitive Cells'])
+    plt.plot(solution.t / hours_in_a_day, solution.y[1], label='Persister Cells', color=cell_colors['Persister Cells'])
+    plt.plot(solution.t / hours_in_a_day, solution.y[2], label='Resistant Cells', color=cell_colors['Resistant Cells'])
+    plt.title(f"{each_type.capitalize()} Therapy")
+    plt.xlabel("Time (days)")
+    plt.ylabel("Number of Cells")
+    plt.yscale("log") # Use a special scale for cell counts
+    plt.legend() # Show what each line means
+    plt.grid(True) # Add a grid
+
+plt.tight_layout() # Adjust plot to prevent labels from overlapping
+plt.savefig(os.path.join(image_save_dir, "basic_therapy_cell_counts_comparison.png"), dpi=300, bbox_inches='tight')
+plt.close() # Close the figure to free memory
