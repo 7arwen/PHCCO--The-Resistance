@@ -1,0 +1,180 @@
+import numpy as np
+from scipy.optimize import curve_fit
+import matplotlib.pyplot as plt
+
+def exponential_func(t, A, k):
+    """
+    Exponential function: A * e^(k*t)
+    A: Initial amplitude/scaling factor
+    k: Growth rate constant (what we want to find)
+    t: Time (days)
+    """
+    return A * np.exp(k * t)
+
+# DTEP data points from D6 to D11
+x_data = np.array([6.0123282693705224, 7.0032615842475, 8.015736927708758,
+                   9.006670242585734, 10.019145586046994, 11.010078900923972])
+y_data = np.array([11605.826605826602, 19471.744471744474, 30542.295542295542,
+                   36077.571077571076, 38116.883116883124, 47439.45243945245])
+
+print("="*70)
+print("DTEP EXPONENTIAL GROWTH ANALYSIS: Ae^(kt)")
+print("="*70)
+print(f"Data Range: D{x_data[0]:.1f} to D{x_data[-1]:.1f}")
+print(f"Cell Count Range: {y_data[0]:.0f} to {y_data[-1]:.0f} cells/well")
+print("="*70)
+
+try:
+    # Initial parameter guesses
+    # A: approximate y-intercept when extrapolated to t=0
+    # k: rough estimate from growth pattern
+    initial_guess = [5000, 0.2]
+
+    # Set bounds to ensure realistic biological parameters
+    # A: positive cell count, k: reasonable growth rate
+    bounds = ([0, 0], [100000, 1.0])  # Lower and upper bounds
+
+    # Fit exponential curve to DTEP data
+    popt, pcov = curve_fit(exponential_func, x_data, y_data,
+                          p0=initial_guess, bounds=bounds, maxfev=5000)
+
+    A_fit, k_fit = popt
+
+    # Calculate parameter uncertainties
+    param_errors = np.sqrt(np.diag(pcov))
+    A_error, k_error = param_errors
+
+    print(f"FITTED PARAMETERS:")
+    print(f"  A (Amplitude): {A_fit:.2f} ± {A_error:.2f} cells/well")
+    print(f"  k (Growth rate): {k_fit:.6f} ± {k_error:.6f} /day")
+    print(f"  Equation: y = {A_fit:.2f} * e^({k_fit:.6f} * t)")
+
+    # Calculate goodness of fit
+    y_pred = exponential_func(x_data, A_fit, k_fit)
+    ss_res = np.sum((y_data - y_pred) ** 2)
+    ss_tot = np.sum((y_data - np.mean(y_data)) ** 2)
+    r_squared = 1 - (ss_res / ss_tot)
+
+    print(f"  R-squared: {r_squared:.4f}")
+
+    # Calculate doubling time and growth metrics
+    doubling_time = np.log(2) / k_fit
+    daily_growth_rate = (np.exp(k_fit) - 1) * 100
+
+    print(f"\n{'='*70}")
+    print("GROWTH CHARACTERISTICS")
+    print("="*70)
+    print(f"📈 Growth Rate (k): {k_fit:.6f} per day")
+    print(f"⏰ Doubling Time: {doubling_time:.2f} days")
+    print(f"📊 Daily Growth Rate: {daily_growth_rate:.2f}% per day")
+    print(f"🔢 Population multiplies by {np.exp(k_fit):.3f}x each day")
+
+    # Predict cell counts at different time points
+    print(f"\n{'='*70}")
+    print("CELL COUNT PREDICTIONS")
+    print("="*70)
+    print(f"{'Day':<8} {'Actual':<12} {'Predicted':<12} {'Difference':<12} {'Error %':<10}")
+    print("-" * 65)
+
+    for i, (day, actual) in enumerate(zip(x_data, y_data)):
+        predicted = exponential_func(day, A_fit, k_fit)
+        difference = abs(actual - predicted)
+        error_percent = (difference / actual) * 100
+        print(f"{day:<8.1f} {actual:<12.0f} {predicted:<12.0f} {difference:<12.0f} {error_percent:<10.1f}")
+
+    # Future predictions
+    future_days = [12, 13, 14, 15]
+    print(f"\nFUTURE PREDICTIONS:")
+    print(f"{'Day':<8} {'Predicted Cells':<15} {'Fold Increase':<15}")
+    print("-" * 40)
+    baseline_count = y_data[0]  # D6 as baseline
+
+    for day in future_days:
+        predicted = exponential_func(day, A_fit, k_fit)
+        fold_increase = predicted / baseline_count
+        print(f"D{day:<7.0f} {predicted:<15.0f} {fold_increase:<15.1f}x")
+
+except Exception as e:
+    print(f"Exponential curve fitting failed: {e}")
+    exit()
+
+# Create comprehensive visualization
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+
+# Plot 1: Data and fitted curve
+ax1.scatter(x_data, y_data, color='red', s=80, label='DTEP Data (D6-D11)',
+           zorder=5, edgecolors='black', linewidth=1)
+
+# Generate smooth curve for plotting
+t_smooth = np.linspace(x_data[0], x_data[-1] + 1, 200)
+y_smooth = exponential_func(t_smooth, A_fit, k_fit)
+ax1.plot(t_smooth, y_smooth, 'b-', linewidth=3,
+         label=f'Fitted: y = {A_fit:.0f}e^({k_fit:.4f}t)', alpha=0.8)
+
+# Add error bars (estimated experimental error)
+error_estimate = y_data * 0.05  # Assume 5% experimental error
+ax1.errorbar(x_data, y_data, yerr=error_estimate, fmt='none',
+            capsize=4, capthick=1.5, elinewidth=1.5, color='red', alpha=0.6)
+
+ax1.set_xlabel('Days', fontsize=12, fontweight='bold')
+ax1.set_ylabel('Cells/well', fontsize=12, fontweight='bold')
+ax1.set_title(f'DTEP Exponential Growth\nk = {k_fit:.4f} /day, R² = {r_squared:.3f}',
+              fontsize=14, fontweight='bold')
+ax1.legend(fontsize=11)
+ax1.grid(True, alpha=0.3)
+ax1.ticklabel_format(style='scientific', axis='y', scilimits=(0,0))
+
+# Plot 2: Growth rate analysis
+days_extended = np.linspace(6, 15, 100)
+cells_extended = exponential_func(days_extended, A_fit, k_fit)
+
+ax2.plot(days_extended, cells_extended, 'g-', linewidth=2, label='Projected Growth')
+ax2.scatter(x_data, y_data, color='red', s=80, zorder=5,
+           label='Experimental Data', edgecolors='black')
+
+# Mark doubling points
+doubling_intervals = np.arange(6, 15, doubling_time)
+for i, day in enumerate(doubling_intervals[:-1]):
+    cells_at_day = exponential_func(day, A_fit, k_fit)
+    ax2.axvline(x=day, color='orange', linestyle='--', alpha=0.7)
+    ax2.text(day, cells_at_day * 1.1, f'2^{i}', ha='center', fontweight='bold')
+
+ax2.set_xlabel('Days', fontsize=12, fontweight='bold')
+ax2.set_ylabel('Cells/well', fontsize=12, fontweight='bold')
+ax2.set_title(f'Growth Projection\nDoubling Time: {doubling_time:.2f} days',
+              fontsize=14, fontweight='bold')
+ax2.legend(fontsize=11)
+ax2.grid(True, alpha=0.3)
+ax2.ticklabel_format(style='scientific', axis='y', scilimits=(0,0))
+
+plt.tight_layout()
+plt.show()
+
+# Summary results
+print(f"\n{'='*70}")
+print("FINAL DTEP GROWTH ANALYSIS SUMMARY")
+print("="*70)
+print(f" EXPONENTIAL EQUATION: y = {A_fit:.0f} * e^({k_fit:.6f} * t)")
+print(f" GROWTH RATE (k): {k_fit:.6f} per day")
+print(f" FIT QUALITY (R²): {r_squared:.4f}")
+print(f" DOUBLING TIME: {doubling_time:.2f} days")
+print(f" DAILY INCREASE: {daily_growth_rate:.1f}% per day")
+
+# Biological interpretation
+print(f"\n{'='*70}")
+print("BIOLOGICAL INTERPRETATION")
+print("="*70)
+print(f" Drug-Tolerant Persister (DTEP) cells show exponential recovery")
+print(f" Fast growth rate indicates active proliferation post-drug stress")
+print(f" k = {k_fit:.4f} suggests moderate-to-fast recovery kinetics")
+
+if k_fit > 0.2:
+    print(f" HIGH growth rate: Rapid DTEP expansion (k > 0.2)")
+elif k_fit > 0.1:
+    print(f" MODERATE growth rate: Steady DTEP recovery (0.1 < k < 0.2)")
+else:
+    print(f" SLOW growth rate: Gradual DTEP expansion (k < 0.1)")
+
+print(f"📈 Cell population increases {np.exp(k_fit):.2f}-fold every day")
+print(f"🔢 Starting from {y_data[0]:.0f} cells, reaching {y_data[-1]:.0f} cells by D11")
+print(f"{'='*70}")
